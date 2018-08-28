@@ -1,0 +1,138 @@
+diff --git a/TODO.txt b/TODO.txt
+new file mode 100644
+index 000000000..c262b9494
+--- /dev/null
++++ b/TODO.txt
+@@ -0,0 +1,15 @@
++- update all relevant documentation
++- write an init.vim -> init.lua tutorial
++
++- hangs when there's a syntax error in the init.lua script :-(
++- what about 'exrc'? See :help startup
++- check how we interact with things like $VIMINT and $EXINIT
++- unit tests should set $VIM so that system vimrc file doesn't hurt things
++- test for system init script $VIM/sysinit.vim and how it interacts (it should be loaded first I believe)
++- test for nasty things
++  - init.lua is a directory
++  - init.lua is an invalid symlink
++  - init.lua exists but isn't readable
++  - init.lua has a syntax error and can't be processed at all
++  - init.lua has a runtime error in it
++  - init.lua imports something bad and dies horribly
+diff --git a/runtime/doc/starting.txt b/runtime/doc/starting.txt
+index ad1077bca..b9e97cd05 100644
+--- a/runtime/doc/starting.txt
++++ b/runtime/doc/starting.txt
+@@ -394,7 +394,7 @@ accordingly.  Vim proceeds in this order:
+ 3. Execute Ex commands, from environment variables and/or files
+ 	An environment variable is read as one Ex command line, where multiple
+ 	commands must be separated with '|' or "<NL>".
+-						    *init.vim* *vimrc* *exrc*
++					    *init.vim* *init.lua* *vimrc* *exrc*
+ 	A file that contains initialization commands is called a "vimrc" file.
+ 	Each line in a vimrc file is executed as an Ex command line.  It is
+ 	sometimes also referred to as "exrc" file.  They are the same type of
+diff --git a/test/functional/core/startup_spec.lua b/test/functional/core/startup_spec.lua
+index 2a67453bc..80f50663f 100644
+--- a/test/functional/core/startup_spec.lua
++++ b/test/functional/core/startup_spec.lua
+@@ -1,5 +1,6 @@
+ local helpers = require('test.functional.helpers')(after_each)
+ local Screen = require('test.functional.ui.screen')
++local lfs = require('lfs')
+ 
+ local clear = helpers.clear
+ local command = helpers.command
+@@ -10,16 +11,36 @@ local nvim_prog = helpers.nvim_prog
+ local nvim_set = helpers.nvim_set
+ local read_file = helpers.read_file
+ local retry = helpers.retry
++local mkdir = helpers.mkdir
++local rmdir = helpers.rmdir
+ local sleep = helpers.sleep
+ local iswin = helpers.iswin
+ 
++-- TODO: call this Xtest_startup_fakehome
++local cwd = lfs.currentdir()
++local fakehome = cwd..'/tmp-test-fakehome'
++
++local function writehome(path, data)
++  local f = io.open(fakehome..'/'..path, 'w')
++  f:write(data)
++  f:write('\n')
++  f:close()
++end
++
+ describe('startup', function()
+   before_each(function()
+     clear()
+     os.remove('Xtest_startup_ttyout')
++
++	-- create a fake home directory
++	mkdir(fakehome)
++	mkdir(fakehome..'/.config')
++	mkdir(fakehome..'/.config/nvim')
+   end)
+   after_each(function()
+     os.remove('Xtest_startup_ttyout')
++	-- clean up the fake home directory
++	rmdir(fakehome)
+   end)
+ 
+   it('pipe at both ends: has("ttyin")==0 has("ttyout")==0', function()
+@@ -196,5 +217,45 @@ describe('startup', function()
+        funcs.system({nvim_prog, '-n', '-es' },
+                     { 'set encoding', '' }))
+   end)
+-end)
+ 
++  it('will load init.lua instead of init.vim', function()
++    -- write out an init.vim and an init.lua that will each define specific
++    -- global variable we can look for
++    writehome('.config/nvim/init.lua', [[
++          vim.api.nvim_set_var('reached_init_lua', 1)
++    ]])
++    writehome('.config/nvim/init.vim', [[
++          let g:reached_init_vim = 1
++    ]])
++
++	local expressions = {
++		'get(g:, "reached_init_lua", 0)',
++		'get(g:, "reached_init_vim", 0)',
++		'$MYVIMRC',
++	}
++	local results = {
++		'1',
++		'0',
++		fakehome..'/.config/nvim/init.lua',
++	}
++
++	-- set $HOME to new value
++	command(string.format("let $HOME = '%s'", fakehome))
++    local out = funcs.system({nvim_prog, '-i', 'NONE', '--headless',
++                               '--cmd', nvim_set,
++                               '-c', 'echo '..table.concat(expressions, ' '),
++                               '+q' })
++    eq(table.concat(results, ' '), out)
++  end)
++
++  it('will not put init.lua\'s path in $MYVIMRC if it is already set', function()
++    -- make a placeholder init.lua
++    writehome('.config/nvim/init.lua', [[vim.api.nvim_set_var('reached_init_lua', 1)]])
++
++    begin_session({MYVIMRC='fireflies'})
++
++    -- prove that init.lua was executed; $MYVIMRC should _not_ have changed
++    eq(1, eval('get(g:, "reached_init_lua", 0)'))
++    eq('fireflies', eval('$MYVIMRC'))
++  end)
++end)
+diff --git a/test/functional/ui/startup_spec.lua b/test/functional/ui/startup_spec.lua
+index d50c388b7..e655a4add 100644
+--- a/test/functional/ui/startup_spec.lua
++++ b/test/functional/ui/startup_spec.lua
+@@ -1,3 +1,4 @@
++-- TODO: refactor all this into test/functional/core/startup_spec.lua
+ -- FIXME: ideally we'll eventually have tests for the entire startup sequence
+ -- described at ":help initialization"
+ -- For now, I'm just adding tests to ensure an init.lua gets loaded correctly
